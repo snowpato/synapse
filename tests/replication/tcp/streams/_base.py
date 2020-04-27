@@ -12,8 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-from mock import Mock
+from typing import Any, Dict, List, Tuple
 
 from synapse.replication.tcp.handler import ReplicationCommandHandler
 from synapse.replication.tcp.protocol import ClientReplicationStreamProtocol
@@ -26,8 +25,11 @@ from tests.server import FakeTransport
 class BaseStreamTestCase(unittest.HomeserverTestCase):
     """Base class for tests of the replication streams"""
 
+    def __init__(self, methodName, *args, **kwargs):
+        super().__init__(methodName, *args, **kwargs)
+        self.test_handler = TestReplicationDataHandler()
+
     def make_homeserver(self, reactor, clock):
-        self.test_handler = Mock(wraps=TestReplicationDataHandler())
         return self.setup_test_homeserver(replication_data_handler=self.test_handler)
 
     def prepare(self, reactor, clock, hs):
@@ -37,7 +39,6 @@ class BaseStreamTestCase(unittest.HomeserverTestCase):
         self.server = server_factory.buildProtocol(None)
 
         repl_handler = ReplicationCommandHandler(hs)
-        repl_handler.handler = self.test_handler
         self.client = ClientReplicationStreamProtocol(
             hs, "client", "test", clock, repl_handler,
         )
@@ -79,19 +80,24 @@ class TestReplicationDataHandler:
     """Drop-in for ReplicationDataHandler which just collects RDATA rows"""
 
     def __init__(self):
-        self.streams = set()
-        self._received_rdata_rows = []
+        # streams to subscribe to: map from stream id to position
+        self.stream_positions = {}  # type: Dict[str, int]
+
+        # list of received (stream_name, token, row) tuples
+        self.received_rdata_rows = []  # type: List[Tuple[str, int, Any]]
 
     def get_streams_to_replicate(self):
-        positions = {s: 0 for s in self.streams}
-        for stream, token, _ in self._received_rdata_rows:
-            if stream in self.streams:
-                positions[stream] = max(token, positions.get(stream, 0))
-        return positions
+        return self.stream_positions
 
     async def on_rdata(self, stream_name, token, rows):
         for r in rows:
-            self._received_rdata_rows.append((stream_name, token, r))
+            self.received_rdata_rows.append((stream_name, token, r))
+
+        if (
+            stream_name in self.stream_positions
+            and token > self.stream_positions[stream_name]
+        ):
+            self.stream_positions[stream_name] = token
 
     async def on_position(self, stream_name, token):
         pass
